@@ -1,0 +1,286 @@
+import 'package:flutter/material.dart';
+import 'package:firebase/firebase.dart';
+import 'dart:convert';
+import 'package:flutter_webrtc/webrtc.dart';
+import 'package:sdp_transform/sdp_transform.dart';
+import 'package:uuid/uuid.dart';
+import 'dart:async';
+
+void main() {
+  initializeApp(
+      apiKey: "AIzaSyAvqjTmzHxt2zM6AsDNzzdSSmLfkKhuXvQ",
+      authDomain: "boilercam-d128e.firebaseapp.com",
+      databaseURL: "https://boilercam-d128e-default-rtdb.firebaseio.com/",
+      projectId: "boilercam-d128e",
+      storageBucket: "boilercam-d128e.appspot.com");
+  runApp(MyApp());
+}
+
+
+class MyApp extends StatefulWidget {
+
+  @override
+  _MyAppState createState() => _MyAppState();
+}
+
+class _MyAppState extends State<MyApp> {
+  String cameraID = 'Camera-1';
+  String _sdpOffer;
+  String _sdpAnswer;
+  String sdpOfferGet;
+  bool firstRun = true;
+  String sessionNum;
+  int _candidateCount;
+
+  bool _offer = false;
+  RTCPeerConnection _peerConnection;
+  MediaStream _localStream;
+  RTCVideoRenderer _localRenderer = new RTCVideoRenderer();
+  RTCVideoRenderer _remoteRenderer = new RTCVideoRenderer();
+  var uuid = Uuid();
+
+  final sdpController = TextEditingController();
+
+  DatabaseReference db = database().ref('Camera-webRTC').child('Camera-1');
+
+  @override
+  dispose() {
+    _localRenderer.dispose();
+    _remoteRenderer.dispose();
+    sdpController.dispose();
+    super.dispose();
+  }
+
+  @override
+  void initState() {
+    initRenderers();
+    _createPeerConnection().then((pc) {
+      _peerConnection = pc;
+    });
+    db.child('sdpOffer').onValue.listen((e) {
+      DataSnapshot _dataSnapshot = e.snapshot;
+      Map<String, dynamic> _sdpOfferSnapshot = _dataSnapshot.val();
+      if(!firstRun) {
+        _sdpOffer = _sdpOfferSnapshot['sdpOffer'];
+        _candidateCount = 0;
+        _setUpConnection();
+      } else {
+        firstRun = false;
+      }
+    });
+
+    super.initState();
+  }
+
+  _setUpConnection() async {
+    await _setRemoteDescription();
+    await _createAnswer();
+  }
+
+  initRenderers() async {
+    await _localRenderer.initialize();
+    await _remoteRenderer.initialize();
+  }
+
+  void _createOffer() async {
+    RTCSessionDescription description =
+    await _peerConnection.createOffer({'offerToReceiveVideo': 0,'offerToReceiveAudio': 1});
+    var session = parse(description.sdp);
+    print(json.encode(session));
+    _offer = true;
+
+    _peerConnection.setLocalDescription(description);
+  }
+
+  Future<void> _createAnswer() async {
+    RTCSessionDescription description =
+    await _peerConnection.createAnswer({'offerToReceiveVideo': true, "OfferToReceiveAudio": false});
+
+    var session = parse(description.sdp);
+    _sdpAnswer = json.encode(session);
+    db.child('sdpAnswer').set({'sdpAnswer':_sdpAnswer});
+
+    _peerConnection.setLocalDescription(description);
+  }
+
+  Future<void> _setRemoteDescription() async {
+    String jsonString = _sdpOffer;
+    dynamic session = await jsonDecode('$jsonString');
+
+    String sdp = write(session, null);
+
+    // RTCSessionDescription description =
+    //     new RTCSessionDescription(session['sdp'], session['type']);
+    RTCSessionDescription description =
+    new RTCSessionDescription(sdp, _offer ? 'answer' : 'offer');
+    print(description.toMap());
+
+    await _peerConnection.setRemoteDescription(description);
+  }
+
+  void _addCandidate() async {
+    String jsonString = sdpController.text;
+    dynamic session = await jsonDecode('$jsonString');
+    print(session['candidate']);
+    dynamic candidate = new RTCIceCandidate(
+        session['candidate'], session['sdpMid'], session['sdpMlineIndex']);
+    await _peerConnection.addCandidate(candidate);
+  }
+
+  _createPeerConnection() async {
+    Map<String, dynamic> configuration = {
+      "iceServers": [
+        {"url": "stun:stun.l.google.com:19302"},
+      ]
+    };
+
+    final Map<String, dynamic> offerSdpConstraints = {
+      "mandatory": {
+        "OfferToReceiveAudio": false,
+        "OfferToReceiveVideo": true,
+      },
+      "optional": [],
+    };
+
+    _localStream = await _getUserMedia();
+
+    RTCPeerConnection pc =
+    await createPeerConnection(configuration, offerSdpConstraints);
+    pc.addStream(_localStream);
+
+    pc.onIceCandidate = (e) {
+      if (e.candidate != null) {
+        String _sdpCandidate = json.encode({
+          'candidate': e.candidate.toString(),
+          'sdpMid': e.sdpMid.toString(),
+          'sdpMlineIndex': e.sdpMlineIndex,
+        });
+        if(_candidateCount<3){
+          switch(_candidateCount){
+            case 0 :{
+              db.child('sdpCandidate1').set({'sdpCandidate': _sdpCandidate});
+            }
+            break;
+            case 1 :{
+              db.child('sdpCandidate2').set({'sdpCandidate': _sdpCandidate});
+            }
+            break;
+            case 2 :{
+              db.child('sdpCandidate3').set({'sdpCandidate': _sdpCandidate});
+            }
+            break;
+          }
+          _candidateCount++;
+        }
+      } else {
+        print('candidate null');
+      }
+    };
+
+    pc.onIceConnectionState = (e) {
+      print(e);
+    };
+
+    pc.onAddStream = (stream) {
+      print('addStream: ' + stream.id);
+      _remoteRenderer.srcObject = stream;
+    };
+
+    return pc;
+  }
+
+  _getUserMedia() async {
+    final Map<String, dynamic> mediaConstraints = {
+      'audio': false,
+      'video': {
+        'facingMode': 'user',
+      },
+    };
+
+    MediaStream stream = await navigator.getUserMedia(mediaConstraints);
+
+    // _localStream = stream;
+    _localRenderer.srcObject = stream;
+    _localRenderer.mirror = true;
+
+    // _peerConnection.addStream(stream);
+
+    return stream;
+  }
+
+  SizedBox videoRenderers() => SizedBox(
+      height: 210,
+      child: Row(children: [
+        Flexible(
+          child: new Container(
+              key: new Key("local"),
+              margin: new EdgeInsets.fromLTRB(5.0, 5.0, 5.0, 5.0),
+              decoration: new BoxDecoration(color: Colors.black),
+              child: new RTCVideoView(_localRenderer)),
+        ),
+        Flexible(
+          child: new Container(
+              key: new Key("remote"),
+              margin: new EdgeInsets.fromLTRB(5.0, 5.0, 5.0, 5.0),
+              decoration: new BoxDecoration(color: Colors.black),
+              child: new RTCVideoView(_remoteRenderer)),
+        )
+      ]));
+
+  Row offerAndAnswerButtons() =>
+      Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: <Widget>[
+        new ElevatedButton(
+          onPressed: _createOffer,
+          child: Text('Offer'),
+        ),
+        ElevatedButton(
+          onPressed: _createAnswer,
+          child: Text('Answer'),
+        ),
+      ]);
+
+  Row sdpCandidateButtons() =>
+      Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: <Widget>[
+        ElevatedButton(
+          onPressed: _setRemoteDescription,
+          child: Text('Set Remote Desc'),
+        ),
+        ElevatedButton(
+          onPressed: _addCandidate,
+          child: Text('Add Candidate'),
+        )
+      ]);
+
+  Padding sdpCandidatesTF() => Padding(
+    padding: const EdgeInsets.all(16.0),
+    child: TextField(
+      controller: sdpController,
+      keyboardType: TextInputType.multiline,
+      maxLines: 4,
+      maxLength: TextField.noMaxLength,
+    ),
+  );
+
+
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      home: Scaffold(
+          appBar: AppBar(
+            title: Text("WebRTC"),
+          ),
+          body: Container(
+              child: Column(children: [
+                videoRenderers(),
+                offerAndAnswerButtons(),
+                sdpCandidatesTF(),
+                sdpCandidateButtons(),
+                SizedBox(height: 30,),
+                ElevatedButton(onPressed: (){
+
+                }, child: Text('Try'))
+              ]))),
+    );
+  }
+}
