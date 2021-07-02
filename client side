@@ -1,0 +1,253 @@
+import 'dart:convert';
+import 'package:demo/assets/loading.dart';
+import 'package:demo/take_photo/photo_trigger_countdown.dart';
+import 'package:demo/take_photo/slide_button.dart';
+import 'package:firebase_database/firebase_database.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_webrtc/webrtc.dart';
+import 'package:sdp_transform/sdp_transform.dart';
+
+
+class CameraControlPage extends StatefulWidget {
+  CameraControlPage({
+    Key key,
+  }) : super(key: key);
+
+  @override
+  _CameraControlPageState createState() => _CameraControlPageState();
+}
+
+class _CameraControlPageState extends State<CameraControlPage> {
+  bool _offer = false;
+  bool _connectionReady = false;
+  RTCPeerConnection _peerConnection;
+  MediaStream _localStream;
+  RTCVideoRenderer _localRenderer = new RTCVideoRenderer();
+  RTCVideoRenderer _remoteRenderer = new RTCVideoRenderer();
+  String _sdpOffer;
+  String _sdpAnswer;
+  String _sdpCandidate1;
+  bool _firstRun = true;
+  bool _countDown = false;
+
+  @override
+  dispose() {
+    _localRenderer.dispose();
+    _remoteRenderer.dispose();
+    _peerConnection.dispose();
+    _localStream.dispose();
+    super.dispose();
+  }
+
+  @override
+  void initState() {
+    initRenderers();
+    _createPeerConnection().then((pc) {
+      _peerConnection = pc;
+      _createOffer();
+    });
+    db
+        .child('Camera-webRTC')
+        .child('Camera-1')
+        .child('sdpAnswer')
+        .onValue
+        .listen((e) {
+      DataSnapshot _dataSnapshot = e.snapshot;
+      Map<dynamic, dynamic> _sdpAnswerSnapshot = _dataSnapshot.value;
+      if (!_firstRun) {
+        _sdpAnswer = _sdpAnswerSnapshot['sdpAnswer'];
+        _setUpConnection();
+      } else {
+        _firstRun = false;
+      }
+    });
+    super.initState();
+  }
+
+  _setUpConnection() async {
+    await _setRemoteDescription();
+    db
+        .child('Camera-webRTC')
+        .child('Camera-1')
+        .child('sdpCandidate1')
+        .once()
+        .then((DataSnapshot _candidateDataSnapShot) {
+      Map<dynamic, dynamic> _sdpCandidateSnapshot =
+          _candidateDataSnapShot.value;
+      _sdpCandidate1 = _sdpCandidateSnapshot['sdpCandidate'];
+      _startConnection();
+    });
+  }
+
+  _startConnection() async {
+    await _addCandidate();
+    setState(() {
+      _connectionReady = true;
+    });
+  }
+
+  initRenderers() async {
+    await _localRenderer.initialize();
+    await _remoteRenderer.initialize();
+  }
+
+  Future<void> _createOffer() async {
+    RTCSessionDescription description = await _peerConnection
+        .createOffer({'offerToReceiveVideo': 1, 'offerToReceiveAudio': 0});
+    var session = parse(description.sdp);
+    _sdpOffer = json.encode(session);
+    print('new offer: ' + _sdpOffer);
+    db
+        .child("Camera-webRTC")
+        .child('Camera-1')
+        .child('sdpOffer')
+        .update({'sdpOffer': _sdpOffer});
+    _offer = true;
+
+    _peerConnection.setLocalDescription(description);
+  }
+
+  Future<void> _setRemoteDescription() async {
+    String jsonString = _sdpAnswer;
+    dynamic session = await jsonDecode('$jsonString');
+
+    String sdp = write(session, null);
+    RTCSessionDescription description =
+        new RTCSessionDescription(sdp, _offer ? 'answer' : 'offer');
+    print(description.toMap());
+
+    await _peerConnection.setRemoteDescription(description);
+  }
+
+  Future<void> _addCandidate() async {
+    String jsonString = _sdpCandidate1;
+    dynamic session = await jsonDecode('$jsonString');
+    print(session['candidate']);
+    dynamic candidate = new RTCIceCandidate(
+        session['candidate'], session['sdpMid'], session['sdpMlineIndex']);
+    await _peerConnection.addCandidate(candidate);
+  }
+
+  _createPeerConnection() async {
+    Map<String, dynamic> configuration = {
+      "iceServers": [
+        {"url": "stun:stun.l.google.com:19302"},
+      ]
+    };
+
+    final Map<String, dynamic> offerSdpConstraints = {
+      "mandatory": {
+        "OfferToReceiveAudio": false,
+        "OfferToReceiveVideo": true,
+      },
+      "optional": [],
+    };
+
+    _localStream = await _getUserMedia();
+
+    RTCPeerConnection pc =
+        await createPeerConnection(configuration, offerSdpConstraints);
+    pc.addStream(_localStream);
+
+    pc.onIceCandidate = (e) {
+      if (e.candidate != null) {
+        print(json.encode({
+          'candidate': e.candidate.toString(),
+          'sdpMid': e.sdpMid.toString(),
+          'sdpMlineIndex': e.sdpMlineIndex,
+        }));
+      }
+    };
+
+    pc.onIceConnectionState = (e) {
+      print(e);
+    };
+
+    pc.onAddStream = (stream) {
+      print('addStream: ' + stream.id);
+      _remoteRenderer.srcObject = stream;
+    };
+
+    return pc;
+  }
+
+  _getUserMedia() async {
+    final Map<String, dynamic> mediaConstraints = {
+      'audio': true,
+      'video': false,
+      // {
+      //   'facingMode': 'user',
+      // },
+    };
+
+
+    MediaStream stream = await navigator.getUserMedia(mediaConstraints);
+
+
+
+
+    // _localStream = stream;
+    _localRenderer.srcObject = stream;
+    // _localRenderer.mirror = true;
+
+    // _peerConnection.addStream(stream);
+
+    return stream;
+  }
+
+  SizedBox videoRenderers() => SizedBox(
+      height: 210,
+      child: Row(children: [
+        Flexible(
+          child: new Container(
+              key: new Key("remote"),
+              margin: new EdgeInsets.fromLTRB(5.0, 5.0, 5.0, 5.0),
+              decoration: new BoxDecoration(color: Colors.black),
+              child: new RTCVideoView(_remoteRenderer)),
+        ),
+        Flexible(
+          child: new Container(
+              key: new Key("local"),
+              margin: new EdgeInsets.fromLTRB(5.0, 5.0, 5.0, 5.0),
+              decoration: new BoxDecoration(color: Colors.black),
+              child: new RTCVideoView(_localRenderer)),
+        ),
+      ]));
+
+  final db = FirebaseDatabase.instance.reference();
+
+  @override
+  Widget build(BuildContext context) {
+    Size size = MediaQuery.of(context).size;
+    if (_connectionReady == false) {
+      return Loading();
+    } else
+      return Scaffold(
+          backgroundColor: Color(0xFF1f253d),
+          body: Stack(
+            children: [
+              Column(children: <Widget>[
+                SizedBox(
+                  height: size.height * 0.2,
+                ),
+                videoRenderers(),
+                SizedBox(
+                  height: 20,
+                ),
+                Row(
+                  children: <Widget>[
+                    ElevatedButton(
+                        onPressed: () {
+                          setState(() {
+                            _countDown = true;
+                          });
+                        },
+                        child: Text('Take Picture')),
+                    SlideButton(onSelected: (label) {}),
+                  ],
+                ),
+              ]),
+            ],
+          ));
+  }
+}
